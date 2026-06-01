@@ -1,52 +1,72 @@
-import json
-from typing import Optional
+"""MCP tools wired to the per-request TenantContext.
+
+All repos are built per-call via factories (`make_licitacion_repo`,
+`make_oc_repo`) using the current tenant's profile_store + the shared
+runtime (`get_http()`, `get_runtime_settings()`). No module-level
+singletons - tenant isolation is enforced by ContextVar.
+
+File outputs go through `ctx.storage.write_bytes(...)`; the generators
+still write to a local Path, so we use a `tempfile.TemporaryDirectory`
+to materialize them and then upload the bytes to the tenant's storage.
+This keeps the generator API untouched (backwards-compat) and isolates
+the multi-tenant concern to this layer.
+"""
+from __future__ import annotations
+
+import tempfile
+from pathlib import Path
+from typing import Any, Optional
+
+from core.tenant_context import current_tenant
+from interfaces.mcp.runtime import get_http, get_runtime_settings
 from interfaces.mcp.server import mcp
-from infrastructure.licitacion_repository import MercadoPublicoLicitacionRepository
-from infrastructure.orden_compra_repository import MercadoPublicoOrdenCompraRepository
+from repos.factory import make_licitacion_repo, make_oc_repo, make_scraper_repo
+
 from application.licitacion.use_cases import (
-    ObtenerLicitacion,
-    ListarLicitacionesHoy,
-    ListarLicitacionesActivas,
-    ListarLicitacionesPorFecha,
-    ListarLicitacionesPorEstado,
-    ListarLicitacionesPorOrganismo,
-    ListarLicitacionesPorProveedor,
     BuscarLicitacionesPorNombre,
     BuscarLicitacionesSoftware,
+    ListarLicitacionesActivas,
+    ListarLicitacionesHoy,
+    ListarLicitacionesPorEstado,
+    ListarLicitacionesPorFecha,
+    ListarLicitacionesPorOrganismo,
+    ListarLicitacionesPorProveedor,
+    ObtenerLicitacion,
 )
-from domain.licitacion.categories import PERFILES
 from application.orden_compra.use_cases import (
-    ObtenerOrdenCompra,
     ListarOrdenesHoy,
-    ListarOrdenesPorFecha,
     ListarOrdenesPorEstado,
+    ListarOrdenesPorFecha,
     ListarOrdenesPorOrganismo,
     ListarOrdenesPorProveedor,
+    ObtenerOrdenCompra,
 )
 
-_lic_repo = MercadoPublicoLicitacionRepository()
-_oc_repo = MercadoPublicoOrdenCompraRepository()
 
 # ─── Licitaciones ────────────────────────────────────────────────────────────
 
 
 @mcp.tool()
-async def obtener_licitacion(codigo: str) -> dict:
+async def obtener_licitacion(codigo: str) -> dict[str, Any]:
     """Obtiene el detalle completo de una licitación de Mercado Público por su código.
     Ejemplo de código: '1509-5-L114'. Retorna todos los campos incluyendo comprador,
     fechas, ítems y adjudicación."""
     try:
-        lic = await ObtenerLicitacion(_lic_repo).execute(codigo)
+        ctx = current_tenant()
+        repo = await make_licitacion_repo(ctx, get_http(), get_runtime_settings())
+        lic = await ObtenerLicitacion(repo).execute(codigo)
         return lic.model_dump(mode="json")
     except Exception as e:
         return {"error": str(e)}
 
 
 @mcp.tool()
-async def listar_licitaciones_hoy() -> dict:
+async def listar_licitaciones_hoy() -> dict[str, Any]:
     """Lista todas las licitaciones publicadas en el día actual en todos sus estados."""
     try:
-        lics = await ListarLicitacionesHoy(_lic_repo).execute()
+        ctx = current_tenant()
+        repo = await make_licitacion_repo(ctx, get_http(), get_runtime_settings())
+        lics = await ListarLicitacionesHoy(repo).execute()
         return {
             "cantidad": len(lics),
             "licitaciones": [l.model_dump(mode="json") for l in lics],
@@ -56,10 +76,12 @@ async def listar_licitaciones_hoy() -> dict:
 
 
 @mcp.tool()
-async def listar_licitaciones_activas() -> dict:
+async def listar_licitaciones_activas() -> dict[str, Any]:
     """Lista únicamente las licitaciones activas/publicadas al día de hoy en Mercado Público."""
     try:
-        lics = await ListarLicitacionesActivas(_lic_repo).execute()
+        ctx = current_tenant()
+        repo = await make_licitacion_repo(ctx, get_http(), get_runtime_settings())
+        lics = await ListarLicitacionesActivas(repo).execute()
         return {
             "cantidad": len(lics),
             "licitaciones": [l.model_dump(mode="json") for l in lics],
@@ -69,11 +91,13 @@ async def listar_licitaciones_activas() -> dict:
 
 
 @mcp.tool()
-async def listar_licitaciones_por_fecha(fecha: str) -> dict:
+async def listar_licitaciones_por_fecha(fecha: str) -> dict[str, Any]:
     """Lista todas las licitaciones de una fecha específica.
     El parámetro 'fecha' debe estar en formato ddmmaaaa (ejemplo: '02022014' para el 2 de febrero de 2014)."""
     try:
-        lics = await ListarLicitacionesPorFecha(_lic_repo).execute(fecha)
+        ctx = current_tenant()
+        repo = await make_licitacion_repo(ctx, get_http(), get_runtime_settings())
+        lics = await ListarLicitacionesPorFecha(repo).execute(fecha)
         return {
             "cantidad": len(lics),
             "licitaciones": [l.model_dump(mode="json") for l in lics],
@@ -85,12 +109,14 @@ async def listar_licitaciones_por_fecha(fecha: str) -> dict:
 @mcp.tool()
 async def listar_licitaciones_por_estado(
     estado: str, fecha: Optional[str] = None
-) -> dict:
+) -> dict[str, Any]:
     """Lista licitaciones filtradas por estado. Si no se especifica fecha, usa el día actual.
     Estados válidos: Publicada, Cerrada, Desierta, Adjudicada, Revocada, Suspendida, Todos.
     Fecha en formato ddmmaaaa (opcional)."""
     try:
-        lics = await ListarLicitacionesPorEstado(_lic_repo).execute(estado, fecha)
+        ctx = current_tenant()
+        repo = await make_licitacion_repo(ctx, get_http(), get_runtime_settings())
+        lics = await ListarLicitacionesPorEstado(repo).execute(estado, fecha)
         return {
             "cantidad": len(lics),
             "licitaciones": [l.model_dump(mode="json") for l in lics],
@@ -102,12 +128,14 @@ async def listar_licitaciones_por_estado(
 @mcp.tool()
 async def listar_licitaciones_por_organismo(
     codigo_organismo: str, fecha: Optional[str] = None
-) -> dict:
+) -> dict[str, Any]:
     """Lista las licitaciones publicadas por un organismo público específico.
     El 'codigo_organismo' es el código numérico del organismo (ejemplo: '6945').
     Fecha en formato ddmmaaaa (opcional, por defecto día actual)."""
     try:
-        lics = await ListarLicitacionesPorOrganismo(_lic_repo).execute(
+        ctx = current_tenant()
+        repo = await make_licitacion_repo(ctx, get_http(), get_runtime_settings())
+        lics = await ListarLicitacionesPorOrganismo(repo).execute(
             codigo_organismo, fecha
         )
         return {
@@ -121,12 +149,14 @@ async def listar_licitaciones_por_organismo(
 @mcp.tool()
 async def listar_licitaciones_por_proveedor(
     codigo_proveedor: str, fecha: Optional[str] = None
-) -> dict:
+) -> dict[str, Any]:
     """Lista las licitaciones asociadas a un proveedor específico.
     El 'codigo_proveedor' es el código numérico del proveedor (ejemplo: '17793').
     Fecha en formato ddmmaaaa (opcional, por defecto día actual)."""
     try:
-        lics = await ListarLicitacionesPorProveedor(_lic_repo).execute(
+        ctx = current_tenant()
+        repo = await make_licitacion_repo(ctx, get_http(), get_runtime_settings())
+        lics = await ListarLicitacionesPorProveedor(repo).execute(
             codigo_proveedor, fecha
         )
         return {
@@ -142,14 +172,16 @@ async def buscar_licitaciones_por_nombre(
     query: str,
     fecha_inicio: Optional[str] = None,
     fecha_fin: Optional[str] = None,
-) -> dict:
+) -> dict[str, Any]:
     """Busca licitaciones cuyo nombre o descripción contengan el texto indicado.
     Si no se especifican fechas, busca entre las licitaciones activas del día.
     Si se especifican, consulta la API día a día en el rango y filtra en memoria.
     Fechas en formato ddmmaaaa. Rango máximo: 30 días.
     Ejemplo: query='equipos computacionales', fecha_inicio='01032024', fecha_fin='07032024'."""
     try:
-        lics = await BuscarLicitacionesPorNombre(_lic_repo).execute(
+        ctx = current_tenant()
+        repo = await make_licitacion_repo(ctx, get_http(), get_runtime_settings())
+        lics = await BuscarLicitacionesPorNombre(repo).execute(
             query, fecha_inicio, fecha_fin
         )
         if not lics:
@@ -171,7 +203,7 @@ async def buscar_licitaciones_software(
     query: Optional[str] = None,
     fecha_inicio: Optional[str] = None,
     fecha_fin: Optional[str] = None,
-) -> dict:
+) -> dict[str, Any]:
     """Busca licitaciones relacionadas con desarrollo de software y servicios TI.
 
     Filtra por códigos UNSPSC de tecnología (prefijos 43, 4323, 81111, 81112)
@@ -183,7 +215,9 @@ async def buscar_licitaciones_software(
 
     Parámetro 'query' opcional para refinar la búsqueda por texto adicional."""
     try:
-        resultados = await BuscarLicitacionesSoftware(_lic_repo).execute(
+        ctx = current_tenant()
+        repo = await make_licitacion_repo(ctx, get_http(), get_runtime_settings())
+        resultados = await BuscarLicitacionesSoftware(repo).execute(
             query=query,
             fecha_inicio=fecha_inicio,
             fecha_fin=fecha_fin,
@@ -213,7 +247,7 @@ async def filtrar_licitaciones_por_categoria(
     codigos_unspsc: list[str],
     fecha_inicio: Optional[str] = None,
     fecha_fin: Optional[str] = None,
-) -> dict:
+) -> dict[str, Any]:
     """Filtra licitaciones por prefijos de código UNSPSC en sus ítems.
 
     Útil para buscar licitaciones de cualquier rubro por categoría de producto.
@@ -226,13 +260,14 @@ async def filtrar_licitaciones_por_categoria(
 
     Fechas en formato ddmmaaaa. Sin fechas, usa las licitaciones activas del día."""
     try:
-        resultados = await BuscarLicitacionesSoftware(_lic_repo).execute(
+        ctx = current_tenant()
+        repo = await make_licitacion_repo(ctx, get_http(), get_runtime_settings())
+        resultados = await BuscarLicitacionesSoftware(repo).execute(
             query=None,
             fecha_inicio=fecha_inicio,
             fecha_fin=fecha_fin,
             perfil="software",
         )
-        # Aplicar filtro manual por los prefijos indicados
         from domain.licitacion.categories import CategoryFilter
         filtradas = [
             r for r in resultados
@@ -251,22 +286,26 @@ async def filtrar_licitaciones_por_categoria(
 
 
 @mcp.tool()
-async def obtener_orden_compra(codigo: str) -> dict:
+async def obtener_orden_compra(codigo: str) -> dict[str, Any]:
     """Obtiene el detalle completo de una orden de compra de Mercado Público por su código.
     Ejemplo de código: '2097-241-SE14'. Retorna todos los campos incluyendo comprador,
     proveedor, ítems con precios y totales."""
     try:
-        oc = await ObtenerOrdenCompra(_oc_repo).execute(codigo)
+        ctx = current_tenant()
+        repo = await make_oc_repo(ctx, get_http(), get_runtime_settings())
+        oc = await ObtenerOrdenCompra(repo).execute(codigo)
         return oc.model_dump(mode="json")
     except Exception as e:
         return {"error": str(e)}
 
 
 @mcp.tool()
-async def listar_ordenes_hoy() -> dict:
+async def listar_ordenes_hoy() -> dict[str, Any]:
     """Lista todas las órdenes de compra emitidas en el día actual en todos sus estados."""
     try:
-        ocs = await ListarOrdenesHoy(_oc_repo).execute()
+        ctx = current_tenant()
+        repo = await make_oc_repo(ctx, get_http(), get_runtime_settings())
+        ocs = await ListarOrdenesHoy(repo).execute()
         return {
             "cantidad": len(ocs),
             "ordenes": [o.model_dump(mode="json") for o in ocs],
@@ -276,11 +315,13 @@ async def listar_ordenes_hoy() -> dict:
 
 
 @mcp.tool()
-async def listar_ordenes_por_fecha(fecha: str) -> dict:
+async def listar_ordenes_por_fecha(fecha: str) -> dict[str, Any]:
     """Lista las órdenes de compra emitidas en una fecha específica.
     El parámetro 'fecha' debe estar en formato ddmmaaaa (ejemplo: '02022014')."""
     try:
-        ocs = await ListarOrdenesPorFecha(_oc_repo).execute(fecha)
+        ctx = current_tenant()
+        repo = await make_oc_repo(ctx, get_http(), get_runtime_settings())
+        ocs = await ListarOrdenesPorFecha(repo).execute(fecha)
         return {
             "cantidad": len(ocs),
             "ordenes": [o.model_dump(mode="json") for o in ocs],
@@ -290,13 +331,15 @@ async def listar_ordenes_por_fecha(fecha: str) -> dict:
 
 
 @mcp.tool()
-async def listar_ordenes_por_estado(estado: str, fecha: Optional[str] = None) -> dict:
+async def listar_ordenes_por_estado(estado: str, fecha: Optional[str] = None) -> dict[str, Any]:
     """Lista órdenes de compra filtradas por estado. Si no se especifica fecha, usa el día actual.
     Estados válidos: enviadaproveedor, aceptada, cancelada, recepcionconforme,
     pendienterecepcion, recepcionaceptadacialmente, recepecionconformeincompleta, todos.
     Fecha en formato ddmmaaaa (opcional)."""
     try:
-        ocs = await ListarOrdenesPorEstado(_oc_repo).execute(estado, fecha)
+        ctx = current_tenant()
+        repo = await make_oc_repo(ctx, get_http(), get_runtime_settings())
+        ocs = await ListarOrdenesPorEstado(repo).execute(estado, fecha)
         return {
             "cantidad": len(ocs),
             "ordenes": [o.model_dump(mode="json") for o in ocs],
@@ -308,12 +351,14 @@ async def listar_ordenes_por_estado(estado: str, fecha: Optional[str] = None) ->
 @mcp.tool()
 async def listar_ordenes_por_organismo(
     codigo_organismo: str, fecha: Optional[str] = None
-) -> dict:
+) -> dict[str, Any]:
     """Lista las órdenes de compra emitidas por un organismo público específico.
     El 'codigo_organismo' es el código numérico del organismo (ejemplo: '6945').
     Fecha en formato ddmmaaaa (opcional, por defecto día actual)."""
     try:
-        ocs = await ListarOrdenesPorOrganismo(_oc_repo).execute(codigo_organismo, fecha)
+        ctx = current_tenant()
+        repo = await make_oc_repo(ctx, get_http(), get_runtime_settings())
+        ocs = await ListarOrdenesPorOrganismo(repo).execute(codigo_organismo, fecha)
         return {
             "cantidad": len(ocs),
             "ordenes": [o.model_dump(mode="json") for o in ocs],
@@ -325,12 +370,14 @@ async def listar_ordenes_por_organismo(
 @mcp.tool()
 async def listar_ordenes_por_proveedor(
     codigo_proveedor: str, fecha: Optional[str] = None
-) -> dict:
+) -> dict[str, Any]:
     """Lista las órdenes de compra enviadas a un proveedor específico.
     El 'codigo_proveedor' es el código numérico del proveedor (ejemplo: '17793').
     Fecha en formato ddmmaaaa (opcional, por defecto día actual)."""
     try:
-        ocs = await ListarOrdenesPorProveedor(_oc_repo).execute(codigo_proveedor, fecha)
+        ctx = current_tenant()
+        repo = await make_oc_repo(ctx, get_http(), get_runtime_settings())
+        ocs = await ListarOrdenesPorProveedor(repo).execute(codigo_proveedor, fecha)
         return {
             "cantidad": len(ocs),
             "ordenes": [o.model_dump(mode="json") for o in ocs],
@@ -339,16 +386,33 @@ async def listar_ordenes_por_proveedor(
         return {"error": str(e)}
 
 
+# ─── Helpers de persistencia ─────────────────────────────────────────────────
+
+
+async def _persist_file_to_storage(local_path: Path, storage_key: str) -> dict[str, Any]:
+    """Read the bytes of a locally-generated file and write them to the
+    tenant's Storage under `storage_key`. Returns dict with key + signed_url.
+    """
+    ctx = current_tenant()
+    data = local_path.read_bytes()
+    await ctx.storage.write_bytes(storage_key, data)
+    try:
+        url = await ctx.storage.signed_url(storage_key)
+    except Exception:
+        url = None
+    return {"key": storage_key, "url": url, "bytes": len(data)}
+
+
 # ─── Cotización ──────────────────────────────────────────────────────────────
 
 
 @mcp.tool()
 async def generar_cotizacion_excel(
     codigo: str,
-    items_precios: list[dict],
-    datos_proveedor: dict,
+    items_precios: list[dict[str, Any]],
+    datos_proveedor: dict[str, Any],
     output_dir: Optional[str] = None,
-) -> dict:
+) -> dict[str, Any]:
     """Genera un archivo Excel de cotización para una licitación de Mercado Público.
 
     Combina los ítems de la licitación (obtenidos de la API) con los precios
@@ -361,33 +425,35 @@ async def generar_cotizacion_excel(
             Ejemplo: [{"correlativo": 1, "precio_unitario_neto": 150000}, ...]
             Si la licitación no tiene ítems en la API, incluir también
             'descripcion', 'cantidad' y 'unidad_medida' en cada dict.
-        datos_proveedor: Dict con datos de la empresa:
-            {"empresa": "Mi Empresa SpA", "rut": "76.123.456-7",
-             "representante_legal": "Juan Pérez", "direccion": "Av. X 123",
-             "telefono": "+56 9 1234 5678", "email": "contacto@empresa.cl",
-             "giro": "Desarrollo de software"}
-        output_dir: Directorio de salida (default: ./ofertas/<codigo>/)
+        datos_proveedor: Dict con datos de la empresa.
+        output_dir: (deprecated) Ignorado en multi-tenant; el archivo
+            se persiste en el storage del tenant bajo 'ofertas/<codigo>/'.
 
     Returns:
-        Dict con:
-        - archivo: path al .xlsx generado
-        - total: monto total de la cotización
-        - items_count: número de ítems incluidos
+        Dict con la clave de storage, URL firmada y total de bytes.
     """
     try:
         from application.cotizacion.use_cases import GenerarCotizacionExcel
-        path = await GenerarCotizacionExcel(_lic_repo).execute(
-            codigo=codigo,
-            items_precios=items_precios,
-            datos_proveedor=datos_proveedor,
-            output_dir=output_dir,
-        )
-        # Calcular total para el resumen
-        from domain.cotizacion.entities import DatosProveedor, ItemCotizacion, Cotizacion
+
+        ctx = current_tenant()
+        repo = await make_licitacion_repo(ctx, get_http(), get_runtime_settings())
+
+        with tempfile.TemporaryDirectory(prefix="mp-cot-") as tmpdir:
+            local = await GenerarCotizacionExcel(repo).execute(
+                codigo=codigo,
+                items_precios=items_precios,
+                datos_proveedor=datos_proveedor,
+                output_dir=tmpdir,
+            )
+            key = f"ofertas/{codigo}/cotizacion_{codigo}.xlsx"
+            persisted = await _persist_file_to_storage(local, key)
+
         return {
             "success": True,
-            "archivo": str(path.absolute()),
-            "mensaje": f"Excel generado correctamente en {path}",
+            "archivo": persisted["key"],
+            "url": persisted["url"],
+            "bytes": persisted["bytes"],
+            "mensaje": f"Excel generado y persistido en storage del tenant ({persisted['key']}).",
         }
     except Exception as e:
         return {"error": str(e)}
@@ -397,7 +463,7 @@ async def generar_cotizacion_excel(
 
 
 @mcp.tool()
-async def listar_tipos_documentos() -> dict:
+async def listar_tipos_documentos() -> dict[str, Any]:
     """Lista todos los tipos de documentos de postulación disponibles para generar.
 
     Retorna el catálogo completo con nombre, descripción y campos requeridos
@@ -410,9 +476,9 @@ async def listar_tipos_documentos() -> dict:
 async def generar_documento_licitacion(
     tipo: str,
     codigo: str,
-    datos_proveedor: dict,
+    datos_proveedor: dict[str, Any],
     output_dir: Optional[str] = None,
-) -> dict:
+) -> dict[str, Any]:
     """Genera un documento DOCX de postulación para una licitación específica.
 
     Args:
@@ -424,23 +490,35 @@ async def generar_documento_licitacion(
             - anexo_5_datos_transferencia
             - anexo_7_pacto_integridad
         codigo: Código de la licitación (ej: '1005498-5-LE26')
-        datos_proveedor: Dict con datos de la empresa. Campos opcionales
-            (se completan con el perfil configurado si no se proveen):
-            empresa, rut, representante_legal, direccion, telefono, email, giro.
-            Para anexo_5, agregar: banco, tipo_cuenta, numero_cuenta, email_transferencia.
-        output_dir: Directorio de salida (default: ./ofertas/<codigo>/documentos_postulacion/)
+        datos_proveedor: Dict con datos de la empresa.
+        output_dir: (deprecated) Ignorado en multi-tenant; el archivo se
+            persiste en el storage del tenant bajo
+            'ofertas/<codigo>/documentos_postulacion/'.
 
     Returns:
-        Dict con 'archivo' (path al .docx generado)."""
+        Dict con clave de storage, URL firmada y tipo."""
     try:
         from application.documentos.use_cases import GenerarDocumento
-        path = await GenerarDocumento(_lic_repo).execute(
-            tipo=tipo,
-            codigo=codigo,
-            datos_proveedor=datos_proveedor,
-            output_dir=output_dir,
-        )
-        return {"success": True, "archivo": str(path.absolute()), "tipo": tipo}
+
+        ctx = current_tenant()
+        repo = await make_licitacion_repo(ctx, get_http(), get_runtime_settings())
+
+        with tempfile.TemporaryDirectory(prefix="mp-doc-") as tmpdir:
+            local = await GenerarDocumento(repo).execute(
+                tipo=tipo,
+                codigo=codigo,
+                datos_proveedor=datos_proveedor,
+                output_dir=tmpdir,
+            )
+            key = f"ofertas/{codigo}/documentos_postulacion/{tipo}.docx"
+            persisted = await _persist_file_to_storage(local, key)
+
+        return {
+            "success": True,
+            "archivo": persisted["key"],
+            "url": persisted["url"],
+            "tipo": tipo,
+        }
     except Exception as e:
         return {"error": str(e)}
 
@@ -448,34 +526,44 @@ async def generar_documento_licitacion(
 @mcp.tool()
 async def generar_documentos_licitacion(
     codigo: str,
-    datos_proveedor: dict,
+    datos_proveedor: dict[str, Any],
     output_dir: Optional[str] = None,
-) -> dict:
+) -> dict[str, Any]:
     """Genera todos los documentos estándar de postulación para una licitación.
 
-    Genera en un solo paso: carta de presentación + los 5 anexos estándar
-    (aceptación de bases, conflicto de intereses, probidad, transferencia, pacto).
+    Genera en un solo paso: carta de presentación + los 5 anexos estándar.
 
     Args:
         codigo: Código de la licitación (ej: '1005498-5-LE26')
-        datos_proveedor: Dict con datos de la empresa (se mezcla con el perfil configurado).
-            Para datos bancarios en Anexo 5: incluir banco, tipo_cuenta, numero_cuenta.
-        output_dir: Directorio de salida (default: ./ofertas/<codigo>/documentos_postulacion/)
+        datos_proveedor: Dict con datos de la empresa.
+        output_dir: (deprecated) Ignorado en multi-tenant; los archivos se
+            persisten bajo 'ofertas/<codigo>/documentos_postulacion/'.
 
     Returns:
-        Dict con lista de archivos generados."""
+        Dict con la lista de claves de storage generadas."""
     try:
         from application.documentos.use_cases import GenerarTodosDocumentos
-        paths = await GenerarTodosDocumentos(_lic_repo).execute(
-            codigo=codigo,
-            datos_proveedor=datos_proveedor,
-            output_dir=output_dir,
-        )
+
+        ctx = current_tenant()
+        repo = await make_licitacion_repo(ctx, get_http(), get_runtime_settings())
+
+        archivos: list[dict[str, Any]] = []
+        with tempfile.TemporaryDirectory(prefix="mp-docs-") as tmpdir:
+            paths = await GenerarTodosDocumentos(repo).execute(
+                codigo=codigo,
+                datos_proveedor=datos_proveedor,
+                output_dir=tmpdir,
+            )
+            for local in paths:
+                key = f"ofertas/{codigo}/documentos_postulacion/{local.name}"
+                persisted = await _persist_file_to_storage(local, key)
+                archivos.append(persisted)
+
         return {
             "success": True,
-            "cantidad": len(paths),
-            "archivos": [str(p.absolute()) for p in paths],
-            "directorio": str(paths[0].parent.absolute()) if paths else None,
+            "cantidad": len(archivos),
+            "archivos": [a["key"] for a in archivos],
+            "urls": [a["url"] for a in archivos],
         }
     except Exception as e:
         return {"error": str(e)}
@@ -484,84 +572,90 @@ async def generar_documentos_licitacion(
 # ─── Perfil de proveedor ─────────────────────────────────────────────────────
 
 
+CAMPOS_REQUERIDOS_PROFILE = [
+    "empresa", "rut", "representante_legal", "direccion", "telefono", "email",
+]
+
+
 @mcp.tool()
-async def guardar_perfil_proveedor(datos: dict) -> dict:
-    """Guarda el perfil de la empresa en ~/.mp-mcp/provider.json para reutilizarlo.
+async def guardar_perfil_proveedor(datos: dict[str, Any]) -> dict[str, Any]:
+    """Guarda el perfil de la empresa en el storage de perfil del tenant.
 
     Una vez guardado, todas las tools de generación usarán estos datos
     automáticamente sin necesidad de pasarlos en cada llamada.
 
     Campos requeridos: empresa, rut, representante_legal, direccion, telefono, email.
-    Campos opcionales: giro, banco, tipo_cuenta, numero_cuenta, email_transferencia.
-
-    Ejemplo:
-        {"empresa": "Tu Empresa SpA", "rut": "76.123.456-7",
-         "representante_legal": "Juan Pérez", "direccion": "Av. X 123, Santiago",
-         "telefono": "+56 9 1234 5678", "email": "contacto@tuempresa.cl",
-         "giro": "Desarrollo de software", "banco": "Banco Estado",
-         "tipo_cuenta": "Cuenta Corriente", "numero_cuenta": "123456789"}"""
+    Campos opcionales: giro, banco, tipo_cuenta, numero_cuenta, email_transferencia,
+    ticket (token ChileCompra para esta empresa)."""
     try:
-        from infrastructure.profile import save_profile, validate_profile
-        faltantes = validate_profile(datos)
+        ctx = current_tenant()
+        faltantes = [c for c in CAMPOS_REQUERIDOS_PROFILE if not datos.get(c)]
         if faltantes:
             return {
                 "error": f"Campos requeridos faltantes: {', '.join(faltantes)}",
-                "campos_requeridos": ["empresa", "rut", "representante_legal", "direccion", "telefono", "email"],
+                "campos_requeridos": CAMPOS_REQUERIDOS_PROFILE,
             }
-        path = save_profile(datos)
-        return {"success": True, "guardado_en": str(path), "campos": list(datos.keys())}
+        existing = await ctx.profile_store.get() or {}
+        merged = {**existing, **datos}
+        await ctx.profile_store.save(merged)
+        return {
+            "success": True,
+            "tenant_id": ctx.tenant_id,
+            "campos": list(merged.keys()),
+        }
     except Exception as e:
         return {"error": str(e)}
 
 
 @mcp.tool()
-async def obtener_perfil_proveedor() -> dict:
-    """Obtiene el perfil de proveedor guardado en ~/.mp-mcp/provider.json.
+async def obtener_perfil_proveedor() -> dict[str, Any]:
+    """Obtiene el perfil de proveedor guardado para el tenant actual.
 
     Retorna los datos guardados o un mensaje indicando que no hay perfil."""
     try:
-        from infrastructure.profile import load_profile, get_profile_path
-        perfil = load_profile()
-        if perfil is None:
+        ctx = current_tenant()
+        perfil = await ctx.profile_store.get()
+        if not perfil:
             return {
                 "perfil": None,
-                "mensaje": "No hay perfil guardado. Usá guardar_perfil_proveedor() para configurarlo.",
-                "path": str(get_profile_path()),
+                "mensaje": (
+                    "No hay perfil guardado para este tenant. "
+                    "Usá guardar_perfil_proveedor() para configurarlo."
+                ),
+                "tenant_id": ctx.tenant_id,
             }
-        return {"perfil": perfil, "path": str(get_profile_path())}
+        return {"perfil": perfil, "tenant_id": ctx.tenant_id}
     except Exception as e:
         return {"error": str(e)}
 
 
 # ─── Orquestación ─────────────────────────────────────────────────────────────
+# NOTE (Chunk 2): las orquestadoras (analizar_licitacion_completa y
+# preparar_oferta) llaman al scraper y a infrastructure/profile (legacy).
+# Migramos la parte API/profile a TenantContext; las llamadas al scraper
+# quedan rotas hasta Chunk 3 (scraper refactor).
 
 
 @mcp.tool()
-async def analizar_licitacion_completa(codigo: str) -> dict:
+async def analizar_licitacion_completa(codigo: str) -> dict[str, Any]:
     """Obtiene un análisis completo de una licitación combinando API + documentos.
 
-    Ejecuta en secuencia:
-    1. Datos estructurados de la API (nombre, organismo, fechas, ítems, monto)
-    2. Score de relevancia para software/TI
-    3. Si hay sesión activa del scraper: descarga y extrae texto de todos los documentos
-    4. Resumen ejecutivo del contenido de las bases (si se pudieron descargar)
-
-    Útil para que el agente evalúe si vale la pena postular antes de generar documentos.
+    Parte API: estructurada vía repo del tenant.
+    Parte scraper: queda pendiente para Chunk 3 (BrowserPool + cookies por tenant).
 
     Args:
         codigo: Código de la licitación (ej: '1005498-5-LE26')"""
-    resultado: dict = {"codigo": codigo}
+    resultado: dict[str, Any] = {"codigo": codigo}
 
-    # 1. Datos de la API
     try:
-        lic = await ObtenerLicitacion(_lic_repo).execute(codigo)
+        ctx = current_tenant()
+        repo = await make_licitacion_repo(ctx, get_http(), get_runtime_settings())
+        lic = await ObtenerLicitacion(repo).execute(codigo)
         resultado["licitacion"] = lic.model_dump(mode="json")
 
-        # Score software
         from domain.licitacion.categories import CategoryFilter
         resultado["score_software"] = CategoryFilter.score_software(lic)
 
-        # Fechas clave
         if lic.Fechas:
             resultado["fecha_cierre"] = (
                 lic.Fechas.FechaCierre.isoformat() if lic.Fechas.FechaCierre else None
@@ -574,160 +668,112 @@ async def analizar_licitacion_completa(codigo: str) -> dict:
         resultado["error_api"] = str(e)
         return resultado
 
-    # 2. Documentos (si hay scraper disponible y sesión activa)
+    # Documentos del scraper (Chunk 3): tenant-scoped via ScraperRepo.
     try:
-        from scraper.auth import cookies_exist
-        from scraper.browser import MPBrowser
-        from scraper.parser import DocumentParser
-        from scraper.storage import LicitacionStorage
-        import asyncio
+        from interfaces.mcp.runtime import RuntimeNotReadyError, get_browser_pool
 
-        if not cookies_exist():
-            resultado["documentos"] = {
-                "disponible": False,
-                "mensaje": "Sin sesión del scraper. Ejecutá 'mp-scraper login' para habilitar descarga de docs.",
-            }
-        else:
-            storage = LicitacionStorage()
-            doc_dir = storage.get_documentos_dir(codigo)
-
-            # Si ya están descargados, reusar
-            if doc_dir.exists() and any(doc_dir.iterdir()):
-                texto = DocumentParser.parse_directory(doc_dir)
-                archivos = [f.name for f in doc_dir.iterdir() if f.is_file()]
-                resultado["documentos"] = {
-                    "disponible": True,
-                    "fuente": "cache",
-                    "cantidad": len(archivos),
-                    "archivos": archivos,
-                    "resumen_preview": texto[:2000] + "..." if len(texto) > 2000 else texto,
-                }
-            else:
-                async with MPBrowser(headless=True) as browser:
-                    ficha_url = await browser.buscar_licitacion(codigo)
-                    if not ficha_url:
-                        resultado["documentos"] = {
-                            "disponible": False,
-                            "mensaje": "No se encontró la ficha en el portal web.",
-                        }
-                    else:
-                        docs = await browser.extraer_links_documentos()
-                        if not docs:
-                            resultado["documentos"] = {
-                                "disponible": True,
-                                "cantidad": 0,
-                                "mensaje": "La ficha existe pero no tiene documentos anexos.",
-                            }
-                        else:
-                            descargados = await browser.descargar_documentos_con_sesion(
-                                docs, doc_dir
-                            )
-                            texto = DocumentParser.parse_directory(doc_dir)
-                            storage.save_resumen(codigo, texto)
-                            resultado["documentos"] = {
-                                "disponible": True,
-                                "fuente": "descargado",
-                                "cantidad": len(descargados),
-                                "archivos": [d.name for d in descargados],
-                                "resumen_preview": texto[:2000] + "..." if len(texto) > 2000 else texto,
-                            }
-    except ImportError:
+        try:
+            pool = get_browser_pool()
+        except RuntimeNotReadyError:
+            pool = None
+        scraper = make_scraper_repo(ctx, pool)
+        resultado["documentos"] = await scraper.descargar_documentacion(codigo)
+    except Exception as exc:  # noqa: BLE001
         resultado["documentos"] = {
             "disponible": False,
-            "mensaje": "Scraper no instalado. Instalá con: cd scraper && pip install -e .",
+            "error": str(exc),
         }
-    except Exception as e:
-        resultado["documentos"] = {"disponible": False, "error": str(e)}
-
     return resultado
 
 
 @mcp.tool()
 async def preparar_oferta(
     codigo: str,
-    items_precios: list[dict],
-    datos_proveedor: Optional[dict] = None,
+    items_precios: list[dict[str, Any]],
+    datos_proveedor: Optional[dict[str, Any]] = None,
     output_dir: Optional[str] = None,
-) -> dict:
+) -> dict[str, Any]:
     """Genera el paquete completo de postulación para una licitación.
 
-    En una sola llamada genera:
-    - cotizacion_<codigo>.xlsx — planilla de precios formateada
-    - carta_presentacion.docx
-    - anexo_2_aceptacion_bases.docx
-    - anexo_3_conflicto_intereses.docx
-    - anexo_4_declaracion_probidad.docx
-    - anexo_5_datos_transferencia.docx
-    - anexo_7_pacto_integridad.docx
-
-    Usa el perfil guardado con guardar_perfil_proveedor() si datos_proveedor
-    no se especifica (o lo combina con los datos adicionales proporcionados).
+    Genera la cotización Excel + todos los DOCX y los persiste en el storage
+    del tenant bajo 'ofertas/<codigo>/'.
 
     Args:
         codigo: Código de la licitación (ej: '1005498-5-LE26')
         items_precios: Lista de precios por correlativo.
-            Ejemplo: [{"correlativo": 1, "precio_unitario_neto": 500000}]
-        datos_proveedor: Dict con datos de la empresa (opcional si hay perfil guardado).
-            Para datos bancarios del Anexo 5 incluir banco, tipo_cuenta, numero_cuenta.
-        output_dir: Directorio raíz de salida (default: ./ofertas/<codigo>/)
-
-    Returns:
-        Dict con paths a todos los archivos generados y totales."""
+        datos_proveedor: Dict opcional. Si no se pasa, se usa el perfil
+            del tenant; si se pasa, se mergea sobre el perfil.
+        output_dir: (deprecated) Ignorado; persistencia va al storage del tenant.
+    """
     try:
-        from infrastructure.profile import merge_with_profile, profile_exists
         from application.cotizacion.use_cases import GenerarCotizacionExcel
         from application.documentos.use_cases import GenerarTodosDocumentos
-        from pathlib import Path
 
-        # Resolver datos de proveedor
-        datos = merge_with_profile(datos_proveedor or {})
+        ctx = current_tenant()
+        perfil = await ctx.profile_store.get() or {}
+        datos = {**perfil, **(datos_proveedor or {})}
         if not datos.get("empresa"):
             return {
-                "error": "No hay perfil de proveedor. Usá guardar_perfil_proveedor() primero o pasá datos_proveedor.",
+                "error": (
+                    "No hay perfil de proveedor para este tenant. "
+                    "Usá guardar_perfil_proveedor() primero o pasá datos_proveedor."
+                ),
             }
 
-        base_dir = Path(output_dir) if output_dir else Path("ofertas") / codigo
+        repo = await make_licitacion_repo(ctx, get_http(), get_runtime_settings())
 
-        # Generar Excel
-        excel_path = await GenerarCotizacionExcel(_lic_repo).execute(
-            codigo=codigo,
-            items_precios=items_precios,
-            datos_proveedor=datos,
-            output_dir=str(base_dir),
-        )
+        archivos: list[dict[str, Any]] = []
+        with tempfile.TemporaryDirectory(prefix="mp-oferta-") as tmpdir:
+            base = Path(tmpdir)
 
-        # Generar todos los DOCX
-        docs_dir = base_dir / "documentos_postulacion"
-        docx_paths = await GenerarTodosDocumentos(_lic_repo).execute(
-            codigo=codigo,
-            datos_proveedor=datos,
-            output_dir=str(docs_dir),
-        )
+            excel_local = await GenerarCotizacionExcel(repo).execute(
+                codigo=codigo,
+                items_precios=items_precios,
+                datos_proveedor=datos,
+                output_dir=str(base),
+            )
+            excel_persisted = await _persist_file_to_storage(
+                excel_local, f"ofertas/{codigo}/cotizacion_{codigo}.xlsx"
+            )
+            archivos.append({"tipo": "cotizacion", **excel_persisted})
 
-        todos_archivos = [str(excel_path.absolute())] + [str(p.absolute()) for p in docx_paths]
+            docs_dir = base / "documentos_postulacion"
+            docx_locals = await GenerarTodosDocumentos(repo).execute(
+                codigo=codigo,
+                datos_proveedor=datos,
+                output_dir=str(docs_dir),
+            )
+            for local in docx_locals:
+                persisted = await _persist_file_to_storage(
+                    local,
+                    f"ofertas/{codigo}/documentos_postulacion/{local.name}",
+                )
+                archivos.append({"tipo": "docx", **persisted})
 
         return {
             "success": True,
             "codigo": codigo,
-            "directorio_base": str(base_dir.absolute()),
-            "cotizacion_excel": str(excel_path.absolute()),
-            "documentos_docx": [str(p.absolute()) for p in docx_paths],
-            "total_archivos": len(todos_archivos),
-            "archivos": todos_archivos,
-            "siguiente_paso": "Revisá los documentos, completá los campos marcados con ___ y cargalos al portal de Mercado Público.",
+            "tenant_id": ctx.tenant_id,
+            "total_archivos": len(archivos),
+            "archivos": [a["key"] for a in archivos],
+            "urls": [a["url"] for a in archivos],
+            "siguiente_paso": (
+                "Revisá los documentos, completá los campos marcados con ___ "
+                "y cargalos al portal de Mercado Público."
+            ),
         }
     except Exception as e:
         return {"error": str(e)}
 
 
 # ─── Importar tools del scraper de documentos (opcional) ─────────────────────
-# Estas tools permiten descargar documentos anexos desde el portal web
+# Estas tools permiten descargar documentos anexos desde el portal web.
+# Chunk 3 las migrará a TenantContext; por ahora se importan tal cual.
 try:
-    from interfaces.mcp.scraper_tools import (
+    from interfaces.mcp.scraper_tools import (  # noqa: F401
         descargar_documentacion_licitacion,
         obtener_info_licitacion_con_documentos,
         verificar_sesion_scraper,
     )
-except ImportError as e:
-    # Scraper no instalado o no disponible
+except ImportError:
     pass

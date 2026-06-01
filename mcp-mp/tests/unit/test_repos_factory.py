@@ -54,9 +54,16 @@ async def test_make_oc_repo_returns_correct_type(
     assert isinstance(repo, MercadoPublicoOrdenCompraRepository)
 
 
-async def test_make_scraper_repo_not_implemented(
+async def test_make_scraper_repo_returns_tenant_scoped_instance(
     tenant_ctx: TenantContext, settings: Settings
 ) -> None:
-    async with httpx.AsyncClient() as http:
-        with pytest.raises(NotImplementedError, match="Chunk 4"):
-            await make_scraper_repo(tenant_ctx, http, settings)
+    """Chunk 3: factory returns a ScraperRepo bound to the tenant context."""
+    from repos.factory import ScraperRepo
+
+    repo = make_scraper_repo(tenant_ctx, None)
+    assert isinstance(repo, ScraperRepo)
+    # verificar_sesion does not need cookies and should report empty.
+    res = await repo.verificar_sesion()
+    assert res["tenant_id"] == "acme"
+    assert res["tiene_cookies"] is False
+    assert res["cantidad_cookies"] == 0

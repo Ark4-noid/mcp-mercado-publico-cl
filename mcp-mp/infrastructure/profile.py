@@ -1,9 +1,22 @@
-"""Gestión del perfil de proveedor persistente en ~/.mp-mcp/provider.json."""
+"""DEPRECATED — use core.tenant_context.current_tenant().profile_store instead.
+
+This module persists data to ~/.mp-mcp/provider.json globally and is
+incompatible with multi-tenant mode. It is kept temporarily for any legacy
+callers; new code must use ctx.profile_store.
+"""
 
 import json
 import os
+import warnings
 from pathlib import Path
 from typing import Optional
+
+warnings.warn(
+    "infrastructure.profile is deprecated. "
+    "Use ctx.profile_store via current_tenant().",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 DEFAULT_PROFILE_PATH = Path.home() / ".mp-mcp" / "provider.json"
 

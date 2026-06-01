@@ -1,257 +1,151 @@
-"""Tool MCP para integrar el scraper de documentos."""
+"""MCP tools for the document scraper - tenant-scoped.
 
-from typing import Optional
-from pathlib import Path
-import asyncio
+All scraper tools now go through `ScraperRepo` (built per call from
+`current_tenant()`), so cookies and downloaded documents are isolated per
+tenant via `ctx.secrets` and `ctx.storage`. The legacy global
+`~/.mp-mcp/cookies.json` is no longer used.
 
+For multi-tenant deployments the user must upload cookies once per tenant
+via `subir_cookies_scraper`. For the local stdio path, the legacy migration
+(see `migrations.legacy`) seeds the `local` tenant's secrets store from the
+old cookies file when present.
+"""
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from core.tenant_context import current_tenant
+from interfaces.mcp.runtime import RuntimeNotReadyError, get_browser_pool
 from interfaces.mcp.server import mcp
-from infrastructure.licitacion_repository import MercadoPublicoLicitacionRepository
-from application.licitacion.use_cases import ObtenerLicitacion
-
-try:
-    from scraper.browser import MPBrowser
-    from scraper.parser import DocumentParser
-    from scraper.storage import LicitacionStorage
-    from scraper.auth import cookies_exist, get_cookies_path
-
-    SCRAPER_AVAILABLE = True
-except ImportError as e:
-    print(f"[WARNING] Scraper no disponible: {e}")
-    SCRAPER_AVAILABLE = False
+from repos.factory import make_scraper_repo
 
 
-_lic_repo = MercadoPublicoLicitacionRepository()
+def _safe_get_pool() -> Any:
+    """Return the BrowserPool if available, else None.
 
-
-@mcp.tool()
-async def descargar_documentacion_licitacion(
-    codigo: str,
-    output_dir: Optional[str] = None,
-) -> dict:
+    The pool is optional for cookies-only operations (verificar_sesion,
+    subir_cookies). It is required for actual scraping.
     """
-    Descarga todos los documentos anexos de una licitación desde el portal web de Mercado Público.
-
-    Esta herramienta navega el portal web, extrae los links de documentos anexos (bases, especificaciones,
-    anexos), los descarga y genera un resumen en texto para su análisis.
-
-    Args:
-        codigo: Código de la licitación (ej: "1005498-5-LE26")
-        output_dir: Directorio opcional donde guardar los archivos (default: ./ofertas)
-
-    Returns:
-        Dict con información de la descarga:
-        - codigo: Código de la licitación
-        - ficha_url: URL de la ficha en el portal
-        - documentos_descargados: Lista de archivos descargados
-        - directorio_salida: Path al directorio con los archivos
-        - resumen_path: Path al archivo de resumen en markdown
-        - template_path: Path al template de oferta
-
-    Nota: Esta operación puede tardar varios minutos dependiendo de la cantidad de documentos.
-    """
-    if not SCRAPER_AVAILABLE:
-        return {
-            "error": "Scraper no disponible. Asegúrate de haber instalado las dependencias del scraper: cd scraper && pip install -e .",
-            "codigo": codigo,
-        }
-
     try:
-        # Verificar que hay sesión activa
-        if not cookies_exist():
-            return {
-                "error": "Sin sesión autenticada. Ejecutá 'mp-scraper login' en la terminal para guardar las cookies de sesión.",
-                "codigo": codigo,
-                "ayuda": "El portal requiere autenticación para descargar documentos. Corré 'mp-scraper login', hacé login en el navegador que se abre, y presioná ENTER.",
-            }
-
-        from rich.console import Console
-
-        console = Console()
-
-        output_path = Path(output_dir) if output_dir else None
-        storage = LicitacionStorage(output_path)
-
-        console.print(f"[blue]Procesando licitación: {codigo}[/blue]")
-
-        async with MPBrowser(headless=True) as browser:
-            # Buscar licitación en el portal
-            ficha_url = await browser.buscar_licitacion(codigo)
-
-            if not ficha_url:
-                return {
-                    "error": f"No se pudo encontrar la licitación {codigo} en el portal",
-                    "codigo": codigo,
-                }
-
-            # Extraer links de documentos
-            documentos = await browser.extraer_links_documentos()
-
-            if not documentos:
-                return {
-                    "warning": "No se encontraron documentos anexos en la ficha",
-                    "codigo": codigo,
-                    "ficha_url": ficha_url,
-                }
-
-            # Guardar metadata
-            storage.save_metadata(
-                codigo,
-                {
-                    "ficha_url": ficha_url,
-                    "total_documentos": len(documentos),
-                    "documentos": documentos,
-                },
-            )
-
-            # Descargar documentos usando la sesion del browser (requiere cookies ASP.NET)
-            doc_dir = storage.get_documentos_dir(codigo)
-            descargados = await browser.descargar_documentos_con_sesion(
-                documentos, doc_dir
-            )
-
-            # Parsear documentos y generar resumen
-            console.print("[blue]Generando resumen de documentos...[/blue]")
-            texto_completo = DocumentParser.parse_directory(doc_dir)
-            storage.save_resumen(codigo, texto_completo)
-
-            # Crear template de oferta
-            template_file = storage.create_template_oferta(codigo)
-
-            # Preparar respuesta
-            licitacion_dir = storage.get_licitacion_dir(codigo)
-
-            return {
-                "success": True,
-                "codigo": codigo,
-                "ficha_url": ficha_url,
-                "total_documentos_encontrados": len(documentos),
-                "documentos_descargados": [str(d.name) for d in descargados],
-                "directorio_salida": str(licitacion_dir.absolute()),
-                "resumen_path": str(
-                    (licitacion_dir / "resumen_licitacion.md").absolute()
-                ),
-                "template_path": str(template_file.absolute()),
-                "estructura_archivos": {
-                    "metadata.json": "Información de la licitación y documentos",
-                    "documentos/": f"{len(descargados)} archivos descargados",
-                    "resumen_licitacion.md": "Texto extraído de todos los documentos",
-                    "template_oferta.md": "Template para preparar la oferta",
-                },
-            }
-
-    except Exception as e:
-        return {
-            "error": f"Error procesando licitación: {str(e)}",
-            "codigo": codigo,
-            "tipo_error": type(e).__name__,
-        }
+        return get_browser_pool()
+    except RuntimeNotReadyError:
+        return None
 
 
 @mcp.tool()
-async def obtener_info_licitacion_con_documentos(codigo: str) -> dict:
-    """
-    Obtiene información completa de una licitación incluyendo datos de la API y disponibilidad de documentos.
+async def verificar_sesion_scraper() -> dict[str, Any]:
+    """Verifica si hay cookies de sesión guardadas para el scraper en este tenant.
 
-    Esta herramienta combina:
-    1. Datos estructurados de la API de Mercado Público
-    2. Verificación de disponibilidad de documentos anexos en el portal web
+    En modo multi-tenant las cookies viven en SecretsProvider por tenant.
+    Esta tool no autentica contra el portal — solo reporta si hay cookies
+    disponibles. Si no las hay, usá `subir_cookies_scraper`.
+    """
+    try:
+        ctx = current_tenant()
+        scraper = make_scraper_repo(ctx, _safe_get_pool())
+        return await scraper.verificar_sesion()
+    except Exception as e:  # noqa: BLE001
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def subir_cookies_scraper(cookies_json: str) -> dict[str, Any]:
+    """Sube cookies de sesión del portal de Mercado Público para este tenant.
+
+    En multi-tenant cada usuario debe hacer login en su máquina (por ejemplo
+    con `mp-scraper login` localmente), exportar las cookies del navegador y
+    subir el JSON resultante con esta tool. Las cookies se guardan cifradas
+    por tenant en SecretsProvider.
 
     Args:
-        codigo: Código de la licitación (ej: "1005498-5-LE26")
-
-    Returns:
-        Dict con:
-        - info_api: Datos estructurados de la licitación (nombre, organismo, fechas, etc.)
-        - documentos_disponibles: Bool indicando si hay documentos anexos disponibles
-        - ficha_url: URL de la ficha en el portal web
+        cookies_json: String JSON con una lista de cookies en formato
+            Playwright (name, value, domain, path, etc.).
     """
-    if not SCRAPER_AVAILABLE:
-        # Si no hay scraper, al menos devolvemos info de la API
+    try:
+        ctx = current_tenant()
         try:
-            licitacion = await ObtenerLicitacion(_lic_repo).execute(codigo)
+            cookies = json.loads(cookies_json)
+        except json.JSONDecodeError as exc:
+            return {"error": f"cookies_json no es JSON válido: {exc}"}
+        if not isinstance(cookies, list):
             return {
-                "codigo": codigo,
-                "info_api": licitacion.model_dump(mode="json"),
-                "documentos_disponibles": False,
-                "nota": "Scraper no disponible. Instala las dependencias del scraper para descargar documentos.",
+                "error": "cookies_json debe ser una lista JSON de cookies.",
             }
-        except Exception as e:
-            return {"error": str(e), "codigo": codigo}
-
-    try:
-        # Verificar que hay sesión activa
-        if not cookies_exist():
-            return {
-                "error": "Sin sesión autenticada. Ejecutá 'mp-scraper login' en la terminal para guardar las cookies de sesión.",
-                "codigo": codigo,
-                "ayuda": "El portal requiere autenticación para descargar documentos. Corré 'mp-scraper login', hacé login en el navegador que se abre, y presioná ENTER.",
-            }
-
-        # Obtener datos de la API
-        licitacion = await ObtenerLicitacion(_lic_repo).execute(codigo)
-
-        async with MPBrowser(headless=True) as browser:
-            # Verificar si existe en el portal
-            ficha_url = await browser.buscar_licitacion(codigo)
-
-            if not ficha_url:
-                return {
-                    "codigo": codigo,
-                    "info_api": licitacion.model_dump(mode="json"),
-                    "documentos_disponibles": False,
-                    "ficha_url": None,
-                    "nota": "Licitación encontrada en API pero no en portal web",
-                }
-
-            # Contar documentos disponibles
-            documentos = await browser.extraer_links_documentos()
-
-            return {
-                "codigo": codigo,
-                "info_api": licitacion.model_dump(mode="json"),
-                "documentos_disponibles": len(documentos) > 0,
-                "cantidad_documentos": len(documentos),
-                "ficha_url": ficha_url,
-                "puede_descargarse": True,
-            }
-
-    except Exception as e:
+        await ctx.secrets.set_secret(
+            "cookies", cookies_json.encode("utf-8")
+        )
         return {
-            "error": str(e),
-            "codigo": codigo,
-            "tipo_error": type(e).__name__,
+            "ok": True,
+            "tenant_id": ctx.tenant_id,
+            "cantidad": len(cookies),
         }
+    except Exception as e:  # noqa: BLE001
+        return {"error": str(e)}
 
 
 @mcp.tool()
-async def verificar_sesion_scraper() -> dict:
+async def descargar_documentacion_licitacion(codigo: str) -> dict[str, Any]:
+    """Descarga todos los documentos anexos de una licitación.
+
+    Los documentos se guardan en el storage del tenant bajo
+    `ofertas/<codigo>/documentos/`, y un resumen markdown bajo
+    `ofertas/<codigo>/resumen_licitacion.md`.
+
+    Requiere que el tenant tenga cookies cargadas previamente con
+    `subir_cookies_scraper`.
+
+    Args:
+        codigo: Código de la licitación (ej: '1005498-5-LE26').
     """
-    Verifica si hay una sesión autenticada guardada para el portal de Mercado Público.
+    try:
+        ctx = current_tenant()
+        pool = _safe_get_pool()
+        scraper = make_scraper_repo(ctx, pool)
+        return await scraper.descargar_documentacion(codigo)
+    except Exception as e:  # noqa: BLE001
+        return {"error": str(e), "codigo": codigo}
 
-    El scraper necesita cookies de sesión para descargar documentos adjuntos.
-    Si no hay sesión, ejecutá 'mp-scraper login' en la terminal.
 
-    Returns:
-        Dict con:
-        - autenticado: bool indicando si hay cookies guardadas
-        - cookies_path: path donde se guardan las cookies
-        - mensaje: instrucción para el usuario si no hay sesión
+@mcp.tool()
+async def obtener_info_licitacion_con_documentos(
+    codigo: str,
+) -> dict[str, Any]:
+    """Obtiene info combinada de una licitación (API + documentos del scraper).
+
+    Combina los datos estructurados de la API con la descarga de documentos
+    desde el portal web. Ambas partes son tenant-scoped: la API usa el
+    ticket del perfil del tenant; el scraper usa las cookies del tenant.
+
+    Args:
+        codigo: Código de la licitación (ej: '1005498-5-LE26').
     """
-    if not SCRAPER_AVAILABLE:
-        return {
-            "error": "Scraper no disponible. Instalá las dependencias: cd D:/work/mp-mcp/scraper && pip install -e .",
-            "autenticado": False,
-        }
+    try:
+        from application.licitacion.use_cases import ObtenerLicitacion
+        from interfaces.mcp.runtime import get_http, get_runtime_settings
+        from repos.factory import make_licitacion_repo
 
-    existe = cookies_exist()
-    cookies_path = str(get_cookies_path())
+        ctx = current_tenant()
+        out: dict[str, Any] = {"codigo": codigo, "tenant_id": ctx.tenant_id}
 
-    return {
-        "autenticado": existe,
-        "cookies_path": cookies_path,
-        "mensaje": (
-            "Sesión activa. Podés descargar documentos."
-            if existe
-            else "Sin sesión. Ejecutá 'mp-scraper login' en la terminal para autenticarte."
-        ),
-    }
+        # API side.
+        try:
+            repo = await make_licitacion_repo(
+                ctx, get_http(), get_runtime_settings()
+            )
+            lic = await ObtenerLicitacion(repo).execute(codigo)
+            out["info_api"] = lic.model_dump(mode="json")
+        except Exception as exc:  # noqa: BLE001
+            out["error_api"] = str(exc)
+
+        # Scraper side.
+        scraper = make_scraper_repo(ctx, _safe_get_pool())
+        scraper_result = await scraper.descargar_documentacion(codigo)
+        out["scraper"] = scraper_result
+        out["documentos_disponibles"] = bool(
+            scraper_result.get("ok")
+            and scraper_result.get("documentos_descargados")
+        )
+        return out
+    except Exception as e:  # noqa: BLE001
+        return {"error": str(e), "codigo": codigo}
