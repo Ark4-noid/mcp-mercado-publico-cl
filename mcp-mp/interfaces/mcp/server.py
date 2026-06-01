@@ -35,6 +35,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Import-time side effect: register all MCP tools on `mcp`.
     from interfaces.mcp import tools  # noqa: F401
 
+    # Extend the DNS-rebinding allowlist with any host the server is exposed
+    # under (Cloud Run URL, custom domain, etc.). Without this, FastMCP rejects
+    # the proxied Host header with 421 Misdirected Request.
+    extra_hosts = [h.strip() for h in settings.allowed_hosts.split(",") if h.strip()]
+    if extra_hosts:
+        mcp.settings.transport_security.allowed_hosts = (
+            list(mcp.settings.transport_security.allowed_hosts) + extra_hosts
+        )
+        mcp.settings.transport_security.allowed_origins = (
+            list(mcp.settings.transport_security.allowed_origins)
+            + [f"https://{h}" for h in extra_hosts]
+        )
+
     mcp_app = mcp.streamable_http_app()
 
     @asynccontextmanager

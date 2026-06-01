@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     legacy_ticket_env: str = "MERCADO_PUBLICO_TICKET"
     oauth_audience: str | None = None
     auth_provider: Literal["google", "header"] = "header"
+    # Comma-separated hosts to add to FastMCP's DNS-rebinding allowlist.
+    # Required when the server runs behind a proxy (Cloud Run, Cloud Load
+    # Balancer, etc.) — without it the MCP SDK rejects the proxied Host
+    # header with 421 Misdirected Request.
+    allowed_hosts: str = ""
 
     model_config = SettingsConfigDict(
         env_prefix="MP_",
