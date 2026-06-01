@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -28,38 +29,19 @@ def test_make_storage_gcs_without_bucket_raises(tmp_local_root: Path, monkeypatc
         make_storage(s, "acme")
 
 
-def test_make_storage_gcs_with_bucket(tmp_local_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_make_storage_gcs_with_bucket(
+    tmp_local_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("MP_STORAGE_BACKEND", "gcs")
     monkeypatch.setenv("MP_GCS_BUCKET", "my-bucket")
     monkeypatch.setenv("MP_LOCAL_ROOT", str(tmp_local_root))
+    # Prevent real GCS client construction.
+    monkeypatch.setattr("storage.gcs.gcs_lib.Client", lambda: MagicMock())
+    GCSStorage._shared_client = None
     s = Settings()
     backend = make_storage(s, "acme")
     assert isinstance(backend, GCSStorage)
-
-
-@pytest.mark.asyncio
-async def test_gcs_stub_raises_not_implemented(tmp_local_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("MP_STORAGE_BACKEND", "gcs")
-    monkeypatch.setenv("MP_GCS_BUCKET", "my-bucket")
-    monkeypatch.setenv("MP_LOCAL_ROOT", str(tmp_local_root))
-    s = Settings()
-    backend = make_storage(s, "acme")
-    with pytest.raises(NotImplementedError, match="Sprint 3"):
-        await backend.read_bytes("k")
-    with pytest.raises(NotImplementedError):
-        await backend.write_bytes("k", b"x")
-    with pytest.raises(NotImplementedError):
-        await backend.read_text("k")
-    with pytest.raises(NotImplementedError):
-        await backend.write_text("k", "x")
-    with pytest.raises(NotImplementedError):
-        await backend.exists("k")
-    with pytest.raises(NotImplementedError):
-        await backend.list("")
-    with pytest.raises(NotImplementedError):
-        await backend.delete("k")
-    with pytest.raises(NotImplementedError):
-        await backend.signed_url("k")
+    GCSStorage._shared_client = None
 
 
 def test_make_secrets_localfs(settings: Settings) -> None:
@@ -67,6 +49,61 @@ def test_make_secrets_localfs(settings: Settings) -> None:
     assert isinstance(s, LocalFSSecrets)
 
 
+def test_make_secrets_gsm_without_project_raises(
+    tmp_local_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MP_SECRETS_BACKEND", "gsm")
+    monkeypatch.setenv("MP_LOCAL_ROOT", str(tmp_local_root))
+    monkeypatch.delenv("MP_GCP_PROJECT", raising=False)
+    s = Settings()
+    with pytest.raises(ValueError, match="MP_GCP_PROJECT"):
+        make_secrets(s, "acme")
+
+
+def test_make_secrets_gsm_with_project(
+    tmp_local_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MP_SECRETS_BACKEND", "gsm")
+    monkeypatch.setenv("MP_GCP_PROJECT", "test-project")
+    monkeypatch.setenv("MP_LOCAL_ROOT", str(tmp_local_root))
+    monkeypatch.setattr(
+        "secrets_provider.gsm.secretmanager.SecretManagerServiceClient",
+        lambda: MagicMock(),
+    )
+    from secrets_provider.gsm import GSMSecrets
+    GSMSecrets._shared_client = None
+    s = Settings()
+    backend = make_secrets(s, "acme")
+    assert isinstance(backend, GSMSecrets)
+    GSMSecrets._shared_client = None
+
+
 def test_make_profile_store_localfs(settings: Settings) -> None:
     p = make_profile_store(settings, "acme")
     assert isinstance(p, LocalFSProfileStore)
+
+
+def test_make_profile_store_gcs_without_bucket_raises(
+    tmp_local_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MP_PROFILE_BACKEND", "gcs")
+    monkeypatch.setenv("MP_LOCAL_ROOT", str(tmp_local_root))
+    monkeypatch.delenv("MP_GCS_BUCKET", raising=False)
+    s = Settings()
+    with pytest.raises(ValueError, match="MP_GCS_BUCKET"):
+        make_profile_store(s, "acme")
+
+
+def test_make_profile_store_gcs_with_bucket(
+    tmp_local_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MP_PROFILE_BACKEND", "gcs")
+    monkeypatch.setenv("MP_GCS_BUCKET", "my-bucket")
+    monkeypatch.setenv("MP_LOCAL_ROOT", str(tmp_local_root))
+    monkeypatch.setattr("storage.gcs.gcs_lib.Client", lambda: MagicMock())
+    GCSStorage._shared_client = None
+    from profile_store.gcs import GCSProfileStore
+    s = Settings()
+    backend = make_profile_store(s, "acme")
+    assert isinstance(backend, GCSProfileStore)
+    GCSStorage._shared_client = None

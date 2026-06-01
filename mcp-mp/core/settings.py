@@ -13,15 +13,18 @@ class Settings(BaseSettings):
     """
 
     storage_backend: Literal["localfs", "gcs"] = "localfs"
-    secrets_backend: Literal["localfs"] = "localfs"
-    profile_backend: Literal["localfs"] = "localfs"
+    secrets_backend: Literal["localfs", "gsm"] = "localfs"
+    profile_backend: Literal["localfs", "gcs"] = "localfs"
     local_root: Path = Field(default_factory=lambda: Path.home() / ".mp-mcp")
     chilecompra_base_url: AnyHttpUrl = "https://api.mercadopublico.cl/servicios/v1/publico"  # type: ignore[assignment]
     max_browsers: int = Field(default=2, ge=1, le=10)
     tenant_mode: Literal["legacy", "tenant-aware"] = "legacy"
     gcs_bucket: str | None = None
     gcs_kms_key: str | None = None
+    gcp_project: str | None = None
     legacy_ticket_env: str = "MERCADO_PUBLICO_TICKET"
+    oauth_audience: str | None = None
+    auth_provider: Literal["google", "header"] = "header"
 
     model_config = SettingsConfigDict(
         env_prefix="MP_",
@@ -36,6 +39,18 @@ class Settings(BaseSettings):
         if self.storage_backend == "gcs" and not self.gcs_bucket:
             raise ValueError(
                 "MP_GCS_BUCKET is required when MP_STORAGE_BACKEND=gcs"
+            )
+        if self.profile_backend == "gcs" and not self.gcs_bucket:
+            raise ValueError(
+                "MP_GCS_BUCKET is required when MP_PROFILE_BACKEND=gcs"
+            )
+        if self.secrets_backend == "gsm" and not self.gcp_project:
+            raise ValueError(
+                "MP_GCP_PROJECT is required when MP_SECRETS_BACKEND=gsm"
+            )
+        if self.auth_provider == "google" and not self.oauth_audience:
+            raise ValueError(
+                "MP_OAUTH_AUDIENCE is required when MP_AUTH_PROVIDER=google"
             )
 
 
