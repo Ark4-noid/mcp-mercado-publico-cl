@@ -30,7 +30,7 @@ async def test_obtener_licitacion_ok(repo):
 
 async def test_obtener_licitacion_no_encontrada(repo):
     repo.get_by_codigo.return_value = None
-    with pytest.raises(ValueError, match="no se encontró"):
+    with pytest.raises(ValueError, match="(?i)no se encontró"):
         await ObtenerLicitacion(repo).execute("XXXX")
 
 
