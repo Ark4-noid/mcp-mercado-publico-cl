@@ -28,7 +28,7 @@ async def test_obtener_oc_ok(repo):
 
 async def test_obtener_oc_no_encontrada(repo):
     repo.get_by_codigo.return_value = None
-    with pytest.raises(ValueError, match="no se encontró"):
+    with pytest.raises(ValueError, match="No se encontró"):
         await ObtenerOrdenCompra(repo).execute("XXXX")
 
 

@@ -2,14 +2,24 @@
 #
 # Usage (manual trigger):
 #   gcloud builds submit --config cloudbuild.yaml \
-#     --substitutions=_REGION=southamerica-west1,_AR_REPO=mcp-mp,_GCS_BUCKET=my-bucket,_OAUTH_AUDIENCE=https://...
+#     --substitutions=SHORT_SHA=$(git rev-parse --short=7 HEAD),_GCS_BUCKET=my-bucket,_GCP_PROJECT=my-project,_OAUTH_AUDIENCE=https://...,_ALLOWED_HOSTS=mcp-mp-xxx.run.app
 #
 # Required substitutions (set as trigger defaults in the Console or CLI):
+#   _GCS_BUCKET      GCS bucket for tenant storage (created by setup-gcp.sh)
+#   _GCP_PROJECT     GCP project id for Secret Manager (defaults to $PROJECT_ID)
+#   _OAUTH_AUDIENCE  OAuth audience for ID-token validation (= Cloud Run service URL)
+#   _ALLOWED_HOSTS   Comma-separated public hostnames (Cloud Run URL host, custom domain)
+#                    Required when the FastMCP DNS-rebinding allowlist needs to
+#                    accept proxied Host headers — otherwise /mcp returns 421.
+#
+# Optional substitutions (sensible defaults below):
 #   _REGION          GCP region (recommended: southamerica-west1 — Santiago)
 #   _AR_REPO         Artifact Registry repository name
 #   _SERVICE         Cloud Run service name
-#   _GCS_BUCKET      GCS bucket for tenant storage (created by setup-gcp.sh)
-#   _OAUTH_AUDIENCE  OAuth audience for ID-token validation (= Cloud Run service URL)
+#   _AUTH_PROVIDER   header (dev) | google (prod with OAuth tokens)
+#   SHORT_SHA        Image tag suffix. Cloud Build triggers set this automatically;
+#                    manual `gcloud builds submit` runs must pass it as a
+#                    substitution (it falls back to ${BUILD_ID} below).
 #
 # Build time: ~5-10 min cold on E2_HIGHCPU_8 (image is ~2.5 GB).
 
@@ -18,7 +28,10 @@ substitutions:
   _AR_REPO: mcp-mp
   _SERVICE: mcp-mp
   _GCS_BUCKET: ""
+  _GCP_PROJECT: ""
   _OAUTH_AUDIENCE: ""
+  _ALLOWED_HOSTS: ""
+  _AUTH_PROVIDER: header
   _MIN_INSTANCES: "0"
   _MAX_INSTANCES: "5"
   _MEMORY: 2Gi
@@ -28,9 +41,13 @@ substitutions:
 steps:
   - id: build
     name: gcr.io/cloud-builders/docker
+    # ${SHORT_SHA:-${BUILD_ID}} is not expanded by Cloud Build, so we tag with
+    # both ${SHORT_SHA} (from git triggers or manual override) and ${BUILD_ID}
+    # (always present). The deploy step picks whichever is non-empty.
     args:
       - build
       - --tag=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_SERVICE}:${SHORT_SHA}
+      - --tag=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_SERVICE}:${BUILD_ID}
       - --tag=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_SERVICE}:latest
       - --build-arg=PLAYWRIGHT_VERSION=v1.60.0-noble
       - .
@@ -44,32 +61,34 @@ steps:
 
   - id: deploy
     name: gcr.io/google.com/cloudsdktool/cloud-sdk
-    entrypoint: gcloud
+    entrypoint: bash
+    # Resolve the image tag (SHORT_SHA when present, otherwise BUILD_ID) and
+    # the GCP project (substitution or ${PROJECT_ID} fallback). --update-env-vars
+    # preserves any env set out-of-band; --set-env-vars would wipe them.
     args:
-      - run
-      - deploy
-      - ${_SERVICE}
-      - --image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_SERVICE}:${SHORT_SHA}
-      - --region=${_REGION}
-      - --platform=managed
-      - --execution-environment=gen2
-      - --memory=${_MEMORY}
-      - --cpu=${_CPU}
-      - --concurrency=${_CONCURRENCY}
-      - --min-instances=${_MIN_INSTANCES}
-      - --max-instances=${_MAX_INSTANCES}
-      - --port=8080
-      - --no-cpu-throttling
-      # Auth is enforced by the application AuthMiddleware (Chunk 2).
-      # Cloud Run acts as an open proxy; app-level JWT validation applies.
-      # Switch to --no-allow-unauthenticated + IAP bindings for defence-in-depth
-      # once Chunk 2 auth is validated end-to-end.
-      - --allow-unauthenticated
-      - --set-env-vars=MP_STORAGE_BACKEND=gcs,MP_SECRETS_BACKEND=gsm,MP_PROFILE_BACKEND=gcs,MP_GCS_BUCKET=${_GCS_BUCKET},MP_TENANT_MODE=tenant-aware,MP_OAUTH_AUDIENCE=${_OAUTH_AUDIENCE},MP_AUTH_PROVIDER=google
-      - --service-account=mcp-mp-runtime@${PROJECT_ID}.iam.gserviceaccount.com
+      - -c
+      - |
+        IMAGE_TAG="${SHORT_SHA:-${BUILD_ID}}"
+        GCP_PROJECT="${_GCP_PROJECT:-${PROJECT_ID}}"
+        gcloud run deploy ${_SERVICE} \
+          --image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_SERVICE}:$$IMAGE_TAG \
+          --region=${_REGION} \
+          --platform=managed \
+          --execution-environment=gen2 \
+          --memory=${_MEMORY} \
+          --cpu=${_CPU} \
+          --concurrency=${_CONCURRENCY} \
+          --min-instances=${_MIN_INSTANCES} \
+          --max-instances=${_MAX_INSTANCES} \
+          --port=8080 \
+          --no-cpu-throttling \
+          --allow-unauthenticated \
+          --service-account=mcp-mp-runtime@${PROJECT_ID}.iam.gserviceaccount.com \
+          --update-env-vars=MP_STORAGE_BACKEND=gcs,MP_SECRETS_BACKEND=gsm,MP_PROFILE_BACKEND=gcs,MP_GCS_BUCKET=${_GCS_BUCKET},MP_GCP_PROJECT=$$GCP_PROJECT,MP_TENANT_MODE=tenant-aware,MP_AUTH_PROVIDER=${_AUTH_PROVIDER},MP_OAUTH_AUDIENCE=${_OAUTH_AUDIENCE},MP_ALLOWED_HOSTS=${_ALLOWED_HOSTS}
 
 images:
   - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_SERVICE}:${SHORT_SHA}
+  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_SERVICE}:${BUILD_ID}
   - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_SERVICE}:latest
 
 options:
