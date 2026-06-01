@@ -1,0 +1,79 @@
+# Cloud Build pipeline for the MCP Mercado Publico server.
+#
+# Usage (manual trigger):
+#   gcloud builds submit --config cloudbuild.yaml \
+#     --substitutions=_REGION=southamerica-west1,_AR_REPO=mcp-mp,_GCS_BUCKET=my-bucket,_OAUTH_AUDIENCE=https://...
+#
+# Required substitutions (set as trigger defaults in the Console or CLI):
+#   _REGION          GCP region (recommended: southamerica-west1 — Santiago)
+#   _AR_REPO         Artifact Registry repository name
+#   _SERVICE         Cloud Run service name
+#   _GCS_BUCKET      GCS bucket for tenant storage (created by setup-gcp.sh)
+#   _OAUTH_AUDIENCE  OAuth audience for ID-token validation (= Cloud Run service URL)
+#
+# Build time: ~5-10 min cold on E2_HIGHCPU_8 (image is ~2.5 GB).
+
+substitutions:
+  _REGION: southamerica-west1
+  _AR_REPO: mcp-mp
+  _SERVICE: mcp-mp
+  _GCS_BUCKET: ""
+  _OAUTH_AUDIENCE: ""
+  _MIN_INSTANCES: "0"
+  _MAX_INSTANCES: "5"
+  _MEMORY: 2Gi
+  _CPU: "1"
+  _CONCURRENCY: "1"
+
+steps:
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --tag=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_SERVICE}:${SHORT_SHA}
+      - --tag=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_SERVICE}:latest
+      - --build-arg=PLAYWRIGHT_VERSION=v1.60.0-noble
+      - .
+
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - --all-tags
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_SERVICE}
+
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_SERVICE}:${SHORT_SHA}
+      - --region=${_REGION}
+      - --platform=managed
+      - --execution-environment=gen2
+      - --memory=${_MEMORY}
+      - --cpu=${_CPU}
+      - --concurrency=${_CONCURRENCY}
+      - --min-instances=${_MIN_INSTANCES}
+      - --max-instances=${_MAX_INSTANCES}
+      - --port=8080
+      - --no-cpu-throttling
+      # Auth is enforced by the application AuthMiddleware (Chunk 2).
+      # Cloud Run acts as an open proxy; app-level JWT validation applies.
+      # Switch to --no-allow-unauthenticated + IAP bindings for defence-in-depth
+      # once Chunk 2 auth is validated end-to-end.
+      - --allow-unauthenticated
+      - --set-env-vars=MP_STORAGE_BACKEND=gcs,MP_SECRETS_BACKEND=gsm,MP_PROFILE_BACKEND=gcs,MP_GCS_BUCKET=${_GCS_BUCKET},MP_TENANT_MODE=tenant-aware,MP_OAUTH_AUDIENCE=${_OAUTH_AUDIENCE},MP_AUTH_PROVIDER=google
+      - --service-account=mcp-mp-runtime@${PROJECT_ID}.iam.gserviceaccount.com
+
+images:
+  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_SERVICE}:${SHORT_SHA}
+  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_SERVICE}:latest
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_HIGHCPU_8
+
+timeout: 1800s

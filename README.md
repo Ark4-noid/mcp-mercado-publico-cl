@@ -277,6 +277,54 @@ sequenceDiagram
 
 ---
 
+## Deployment to Google Cloud Run
+
+The server can be deployed as a remote MCP endpoint on Cloud Run for multi-tenant
+use. Each tenant is identified by a Google Identity JWT (Sprint 2 onwards).
+
+### Prerequisites
+
+- A Google Cloud project with billing enabled.
+- `gcloud` CLI installed and authenticated against that project.
+- An OAuth 2.0 client (Google Identity) — set up later in the auth chapter.
+
+### First-time setup (idempotent)
+
+```bash
+PROJECT_ID=my-gcp-project ./scripts/setup-gcp.sh
+```
+
+This enables required APIs, creates an Artifact Registry repo, a GCS bucket
+for tenant storage, and the runtime service account with the right IAM roles.
+
+### Deploy
+
+```bash
+PROJECT_ID=my-gcp-project \
+GCS_BUCKET=mcp-mp-my-gcp-project-data \
+OAUTH_AUDIENCE=https://mcp-mp-xxxxxxxxxx-uc.a.run.app \
+./scripts/deploy.sh
+```
+
+After the first deploy, copy the service URL printed by `gcloud run deploy`
+into `OAUTH_AUDIENCE` and re-run — the audience is the canonical service URL.
+
+### Required env vars on Cloud Run
+
+| Variable | Value |
+|----------|-------|
+| `MP_STORAGE_BACKEND` | `gcs` |
+| `MP_SECRETS_BACKEND` | `gsm` |
+| `MP_PROFILE_BACKEND` | `gcs` |
+| `MP_GCS_BUCKET` | the bucket created by `setup-gcp.sh` |
+| `MP_TENANT_MODE` | `tenant-aware` |
+| `MP_OAUTH_AUDIENCE` | the Cloud Run service URL |
+| `MP_AUTH_PROVIDER` | `google` |
+
+`cloudbuild.yaml` sets these automatically on every deploy.
+
+---
+
 ## Arquitectura
 
 ### Capas DDD

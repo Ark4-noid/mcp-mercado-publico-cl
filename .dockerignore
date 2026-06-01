@@ -1,0 +1,50 @@
+# Version control
+.git/
+.gitignore
+
+# Virtual environments (rebuilt inside the image)
+.venv/
+mcp-mp/.venv/
+scraper/.venv/
+
+# Python bytecode / caches
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+
+# Coverage / test artefacts
+**/htmlcov/
+**/.coverage
+*.log
+
+# IDE / editor
+.vscode/
+.idea/
+
+# OS artefacts
+.DS_Store
+Thumbs.db
+
+# Local runtime data (never needed in the image)
+.mp-mcp/
+ofertas/
+
+# Test suites (not needed at runtime)
+mcp-mp/tests/
+scraper/tests/
+
+# Documentation / meta (not needed at runtime)
+README.md
+CLAUDE.md
+.claude/
+.claude-plugin/
+.agent/
+openspec/
+install.py
+docs/
+
+# Git worktrees
+.git-worktree/
